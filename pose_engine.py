@@ -28,7 +28,25 @@ EDGETPU_SHARED_LIB = 'libedgetpu.so.1'
 POSENET_SHARED_LIB = os.path.join(
     'posenet_lib', os.uname().machine, 'posenet_decoder.so')
 
-
+KEYPOINTS = (
+    'nose',
+    'left eye',
+    'right eye',
+    'left ear',
+    'right ear',
+    'left shoulder',
+    'right shoulder',
+    'left elbow',
+    'right elbow',
+    'left wrist',
+    'right wrist',
+    'left hip',
+    'right hip',
+    'left knee',
+    'right knee',
+    'left ankle',
+    'right ankle'
+)
 class KeypointType(enum.IntEnum):
     """Pose kepoints."""
     NOSE = 0
@@ -106,19 +124,38 @@ class PoseEngine():
         Args:
           img: numpy array containing image
         """
-        input_details = self._interpreter.get_input_details()
-        image_width, image_height = img.size
-        resized_image = img.resize(
-            (self._input_width, self._input_height), Image.NEAREST)
-        input_data = np.expand_dims(resized_image, axis=0)
-        if self._input_type is np.float32:
-            # Floating point versions of posenet take image data in [-1,1] range.
-            input_data = np.float32(resized_image) / 128.0 - 1.0
-        else:
-            # Assuming to be uint8
-            input_data = np.asarray(resized_image)
-        self.run_inference(input_data.flatten())
-        return self.ParseOutput()
+
+        # Extend or crop the input to match the input shape of the network.
+        if img.shape[0] < self.image_height or img.shape[1] < self.image_width:
+            img = np.pad(img, [[0, max(0, self.image_height - img.shape[0])],
+                               [0, max(0, self.image_width - img.shape[1])], [0, 0]],
+                         mode='constant')
+        img = img[0:self.image_height, 0:self.image_width]
+        assert (img.shape == tuple(self._input_tensor_shape[1:]))
+
+        # Run the inference (API expects the data to be flattened)
+        inference_time, output = self.run_inference(img.flatten())
+        outputs = [output[i:j] for i, j in zip(self._output_offsets, self._output_offsets[1:])]
+
+        keypoints = outputs[0].reshape(-1, len(KEYPOINTS), 2)
+        keypoint_scores = outputs[1].reshape(-1, len(KEYPOINTS))
+        pose_scores = outputs[2]
+        nposes = int(outputs[3][0])
+        assert nposes < outputs[0].shape[0]
+
+        # Convert the poses to a friendlier format of keypoints with associated
+        # scores.
+        poses = []
+        for pose_i in range(nposes):
+            keypoint_dict = {}
+            for point_i, point in enumerate(keypoints[pose_i]):
+                keypoint = Keypoint(KEYPOINTS[point_i], point,
+                                    keypoint_scores[pose_i, point_i])
+                if self._mirror: keypoint.yx[1] = self.image_width - keypoint.yx[1]
+                keypoint_dict[KEYPOINTS[point_i]] = keypoint
+            poses.append(Pose(keypoint_dict, pose_scores[pose_i]))
+
+        return poses, inference_time
 
     def get_input_tensor_shape(self):
         """Returns input tensor shape."""
